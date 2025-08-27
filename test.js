@@ -1,9 +1,7 @@
 import fetch from 'node-fetch';
 
 async function testWebhook() {
-  // Wait for the server to start
-  await new Promise(resolve => setTimeout(resolve, 3000));
-  const url = 'http://localhost:3000/webhook/vapi';
+  const url = 'https://riley-questom.vercel.app/webhook/vapi';
   const payload = {
     message: {
       type: 'call-ended',
