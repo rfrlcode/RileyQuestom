@@ -136,6 +136,7 @@ app.post('/webhook/vapi', async (req, res) => {
         break;
 
       case 'call-ended':
+      case 'end-of-call-report': // VAPI sends this instead of call-ended
         // Process the completed call
         await handleCallEnded(message);
         // Clean up stored data
@@ -143,6 +144,7 @@ app.post('/webhook/vapi', async (req, res) => {
         break;
 
       case 'function-call':
+      case 'tool-calls': // VAPI sends this instead of function-call  
         // Handle function calls during the conversation
         return await handleFunctionCall(message, res);
 
@@ -154,6 +156,16 @@ app.post('/webhook/vapi', async (req, res) => {
       case 'conversation-update':
         // Log conversation updates for debugging
         handleConversationUpdate(message);
+        break;
+
+      case 'status-update':
+        // Log status updates (can be ignored)
+        console.log(`Status update: ${message.call?.status || 'unknown'}`);
+        break;
+
+      case 'speech-update':
+        // Log speech updates (can be ignored for email purposes)
+        // console.log(`Speech update from ${message.role}`);
         break;
 
       default:
