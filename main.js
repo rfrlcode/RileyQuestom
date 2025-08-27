@@ -5,7 +5,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '10mb' })); // Increase payload limit for VAPI webhooks
 
 // Environment variables you'll need to set
 const VAPI_WEBHOOK_SECRET = process.env.VAPI_WEBHOOK_SECRET;
