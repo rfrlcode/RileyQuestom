@@ -9,14 +9,19 @@ app.use(express.json());
 
 // Environment variables you'll need to set
 const VAPI_WEBHOOK_SECRET = process.env.VAPI_WEBHOOK_SECRET;
-const ATTIO_API_KEY = process.env.ATTIO_API_KEY;
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const NOTIFICATION_EMAIL = process.env.NOTIFICATION_EMAIL;
 
-console.log('API Key length:', process.env.ATTIO_API_KEY?.length || 'undefined')
+console.log('RESEND_API_KEY set:', !!RESEND_API_KEY);
+console.log('NOTIFICATION_EMAIL:', NOTIFICATION_EMAIL);
+
+// Store lead data during calls - in production use Redis or database
+const callLeadData = new Map();
 
 // Verify VAPI webhook signature
 function verifyWebhookSignature(payload, signature) {
+  if (!VAPI_WEBHOOK_SECRET) return true; // Skip verification if no secret set
+  
   const expectedSignature = crypto
     .createHmac('sha256', VAPI_WEBHOOK_SECRET)
     .update(payload)
@@ -55,8 +60,8 @@ async function sendEmailNotification(callerData) {
           <div style="padding: 30px; background: #f9f9f9;">
             <h2 style="color: #333; border-bottom: 2px solid #667eea; padding-bottom: 10px;">Contact Information</h2>
             <table style="width: 100%; margin-bottom: 20px;">
-              <tr><td style="font-weight: bold; padding: 5px 0;">Name:</td><td>${callerData.firstName || ''} ${callerData.lastName || ''}</td></tr>
-              <tr><td style="font-weight: bold; padding: 5px 0;">Phone:</td><td>${callerData.phoneNumber}</td></tr>
+              <tr><td style="font-weight: bold; padding: 5px 0;">Name:</td><td>${callerData.firstName || 'Not provided'} ${callerData.lastName || ''}</td></tr>
+              <tr><td style="font-weight: bold; padding: 5px 0;">Phone:</td><td>${callerData.phoneNumber || 'Not provided'}</td></tr>
               <tr><td style="font-weight: bold; padding: 5px 0;">Email:</td><td>${callerData.email || 'Not provided'}</td></tr>
               <tr><td style="font-weight: bold; padding: 5px 0;">Company:</td><td>${callerData.company || 'Not provided'}</td></tr>
               <tr><td style="font-weight: bold; padding: 5px 0;">Industry:</td><td>${callerData.industry || 'Not specified'}</td></tr>
@@ -76,6 +81,7 @@ async function sendEmailNotification(callerData) {
             <table style="width: 100%; margin-bottom: 20px;">
               <tr><td style="font-weight: bold; padding: 5px 0;">Call Duration:</td><td>${Math.round(callerData.duration || 0)} seconds (${Math.round((callerData.duration || 0) / 60)} minutes)</td></tr>
               <tr><td style="font-weight: bold; padding: 5px 0;">Call Date:</td><td>${new Date().toLocaleString()}</td></tr>
+              <tr><td style="font-weight: bold; padding: 5px 0;">Call ID:</td><td>${callerData.callId || 'N/A'}</td></tr>
               <tr><td style="font-weight: bold; padding: 5px 0;">Lead Source:</td><td>Inbound Call - Riley AI</td></tr>
             </table>
 
@@ -85,8 +91,6 @@ async function sendEmailNotification(callerData) {
               <p style="margin: 0;">${callerData.notes}</p>
             </div>
             ` : ''}
-
-           
           </div>
           
           <div style="background: #333; color: white; padding: 15px; text-align: center;">
@@ -124,11 +128,18 @@ app.post('/webhook/vapi', async (req, res) => {
     switch (message.type) {
       case 'call-started':
         console.log(`Call started: ${message.call.id} from ${message.call.customer.number}`);
+        // Initialize lead data storage for this call
+        callLeadData.set(message.call.id, {
+          phoneNumber: message.call.customer.number,
+          callId: message.call.id
+        });
         break;
 
       case 'call-ended':
         // Process the completed call
         await handleCallEnded(message);
+        // Clean up stored data
+        callLeadData.delete(message.call.id);
         break;
 
       case 'function-call':
@@ -161,41 +172,38 @@ async function handleCallEnded(message) {
   try {
     const call = message.call;
     
-    // Extract caller information from the call
+    // Get stored lead data from function calls during the conversation
+    const storedLeadData = callLeadData.get(call.id) || {};
+    
+    // Combine call info with stored lead data
     const callerData = {
       phoneNumber: call.customer.number,
       duration: call.duration,
       callId: call.id,
-      // These would be populated during the call via function calls or conversation analysis
-      firstName: call.analysis?.extractedInfo?.firstName,
-      lastName: call.analysis?.extractedInfo?.lastName,
-      email: call.analysis?.extractedInfo?.email,
-      company: call.analysis?.extractedInfo?.company,
-      industry: call.analysis?.extractedInfo?.industry,
-      employeeCount: call.analysis?.extractedInfo?.employeeCount,
-      painPoint: call.analysis?.extractedInfo?.painPoint,
-      timeline: call.analysis?.extractedInfo?.timeline,
-      budget: call.analysis?.extractedInfo?.budget,
-      qualificationScore: call.analysis?.extractedInfo?.qualificationScore,
-      callOutcome: call.analysis?.extractedInfo?.callOutcome,
-      nextSteps: call.analysis?.extractedInfo?.nextSteps,
-      notes: call.analysis?.summary || 'Inbound sales call via Riley AI assistant'
+      notes: call.analysis?.summary || 'Inbound sales call via Riley AI assistant',
+      // Use stored lead data from function calls
+      ...storedLeadData
     };
 
-    // Send email notification
-    await sendEmailNotification(callerData);
+    console.log('Final caller data for email:', callerData);
+
+    // Only send email if we have meaningful lead data
+    if (storedLeadData.firstName || storedLeadData.qualificationScore) {
+      await sendEmailNotification(callerData);
+      console.log('Email notification sent for lead:', callerData.firstName);
+    } else {
+      console.log('No lead data captured during call - skipping email notification');
+    }
 
     console.log('Call processing completed successfully');
   } catch (error) {
     console.error('Error handling call ended:', error);
-    // Re-throw the error to be caught by the main error handler
-    throw error;
   }
 }
 
 // Handle function calls during the conversation
 async function handleFunctionCall(message, res) {
-  const { functionCall } = message;
+  const { functionCall, call } = message;
 
   switch (functionCall.name) {
     case 'capture_lead_info':
@@ -216,12 +224,44 @@ async function handleFunctionCall(message, res) {
         nextSteps: functionCall.parameters.nextSteps
       };
       
+      // Store lead data for this call
+      const existingData = callLeadData.get(call.id) || {};
+      callLeadData.set(call.id, { ...existingData, ...leadData });
+      
       console.log('Captured lead info for Questom:', leadData);
       
       return res.json({
-        result: `Thank you ${leadData.firstName}! I've captured your information and noted that you're interested in AI solutions for ${leadData.company}.`
+        result: `Thank you ${leadData.firstName}! I've captured your information and noted that you're interested in AI solutions${leadData.company ? ` for ${leadData.company}` : ''}.`
       });
 
+    case 'create_attio_contact':
+      // Store contact data (same as capture_lead_info but with immediate confirmation)
+      const contactData = {
+        firstName: functionCall.parameters.firstName,
+        lastName: functionCall.parameters.lastName,
+        email: functionCall.parameters.email,
+        company: functionCall.parameters.company,
+        phoneNumber: functionCall.parameters.phoneNumber,
+        industry: functionCall.parameters.industry,
+        employeeCount: functionCall.parameters.employeeCount,
+        painPoint: functionCall.parameters.painPoint,
+        timeline: functionCall.parameters.timeline,
+        budget: functionCall.parameters.budget,
+        qualificationScore: functionCall.parameters.qualificationScore,
+        callOutcome: functionCall.parameters.callOutcome,
+        nextSteps: functionCall.parameters.nextSteps,
+        notes: functionCall.parameters.notes
+      };
+
+      // Store contact data for this call
+      const existingContactData = callLeadData.get(call.id) || {};
+      callLeadData.set(call.id, { ...existingContactData, ...contactData });
+
+      console.log('Created contact record for:', contactData.firstName);
+
+      return res.json({
+        result: `Perfect! I've added ${contactData.firstName} to our system. Reference ID: QST-${call.id.substring(0, 8)}`
+      });
 
     case 'schedule_demo':
       // Handle demo scheduling requests
@@ -233,6 +273,19 @@ async function handleFunctionCall(message, res) {
         timezone: functionCall.parameters.timezone,
         specificNeeds: functionCall.parameters.specificNeeds
       };
+
+      // Update stored data with demo info
+      const existingDemoData = callLeadData.get(call.id) || {};
+      callLeadData.set(call.id, { 
+        ...existingDemoData, 
+        firstName: functionCall.parameters.firstName,
+        lastName: functionCall.parameters.lastName,
+        email: functionCall.parameters.email,
+        company: functionCall.parameters.company,
+        callOutcome: 'Demo scheduled',
+        nextSteps: `Demo requested for ${functionCall.parameters.requestedTime} (${functionCall.parameters.timezone})`,
+        specificNeeds: functionCall.parameters.specificNeeds
+      });
 
       console.log('Demo scheduling request:', demoRequest);
 
@@ -257,10 +310,40 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
 
+// Test endpoint to verify email sending
+app.post('/test-email', async (req, res) => {
+  try {
+    const testData = {
+      firstName: 'John',
+      lastName: 'Doe', 
+      email: 'john.doe@example.com',
+      company: 'Test Corp',
+      phoneNumber: '+1234567890',
+      industry: 'Technology',
+      employeeCount: '50-200',
+      painPoint: 'Need to automate customer service',
+      timeline: 'Within 3 months',
+      budget: '$1k-5k/month',
+      qualificationScore: 8,
+      callOutcome: 'Demo scheduled',
+      nextSteps: 'Follow up with demo next week',
+      duration: 300,
+      callId: 'test-123',
+      notes: 'Test lead for email notification'
+    };
+
+    await sendEmailNotification(testData);
+    res.json({ success: true, message: 'Test email sent' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`VAPI-Attio webhook server running on port ${PORT}`);
   console.log('Endpoints:');
   console.log(`- POST /webhook/vapi - Main webhook endpoint`);
   console.log(`- GET /health - Health check`);
+  console.log(`- POST /test-email - Test email notification`);
 });
